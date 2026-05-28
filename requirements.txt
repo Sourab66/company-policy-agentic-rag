@@ -1,8 +1,9 @@
-openai
+streamlit
 langchain
-langchain-openai
 langchain-community
+langchain-text-splitters
 chromadb
 pypdf
+sentence-transformers
+ollama
 python-dotenv
-streamlit
