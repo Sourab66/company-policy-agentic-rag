@@ -13,7 +13,7 @@ env/
 .env
 
 # Chroma database and local data
-chroma_db/chroma.sqlite3
+chroma_db/
 
 # Editor files
 .vscode/
