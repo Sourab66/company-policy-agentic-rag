@@ -1,0 +1,22 @@
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# Environment variables
+.env
+
+# Chroma database and local data
+chroma_db/chroma.sqlite3
+
+# Editor files
+.vscode/
+*.swp
+*.swo
+*~
