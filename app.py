@@ -3,130 +3,188 @@ import streamlit as st
 
 from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-
 from langchain_community.vectorstores import Chroma
 from langchain_community.embeddings import HuggingFaceEmbeddings
-
 from langchain_community.chat_models import ChatOllama
 
-# Load environment
+from sentence_transformers import CrossEncoder
+
+from langgraph.graph import StateGraph, END
+from typing import TypedDict, List
+
+# -----------------------------
+# ENV
+# -----------------------------
 load_dotenv()
 
-# Streamlit UI
-st.set_page_config(page_title="Agentic Company Policy Assistant")
+# -----------------------------
+# UI
+# -----------------------------
+st.set_page_config(page_title="LangGraph RAG Agent", page_icon="🤖")
+st.title("🤖 LangGraph Production RAG Agent")
 
-st.title("🤖 Agentic Company Policy Assistant")
+# -----------------------------
+# Reranker
+# -----------------------------
+reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
 
-st.write("Ask questions from the employee handbook.")
+# -----------------------------
+# LLM
+# -----------------------------
+llm = ChatOllama(model="gemma3:4b")
 
-# Load PDF
-loader = PyPDFLoader("Data/Sample-Handbook.pdf")
+# -----------------------------
+# Vector DB
+# -----------------------------
+@st.cache_resource
+def load_vectorstore():
 
-documents = loader.load()
+    loader = PyPDFLoader("Data/Sample-Handbook.pdf")
+    docs = loader.load()
 
-# Split text
-text_splitter = RecursiveCharacterTextSplitter(
-    chunk_size=1200,
-    chunk_overlap=200
-)
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=1200,
+        chunk_overlap=50
+    )
 
-chunks = text_splitter.split_documents(documents)
+    chunks = splitter.split_documents(docs)
 
-# Embeddings
-embeddings = HuggingFaceEmbeddings(
-    model_name="sentence-transformers/all-MiniLM-L6-v2"
-)
+    embeddings = HuggingFaceEmbeddings(
+        model_name="sentence-transformers/all-MiniLM-L6-v2"
+    )
 
-# Vector Store
-vectorstore = Chroma.from_documents(
-    documents=chunks,
-    embedding=embeddings,
-    persist_directory="./chroma_db"
-)
+    return Chroma.from_documents(
+        documents=chunks,
+        embedding=embeddings,
+        persist_directory="./chroma_db"
+    )
 
-# Retriever
+vectorstore = load_vectorstore()
+
 retriever = vectorstore.as_retriever(
     search_type="mmr",
-    search_kwargs={
-        "k": 5,
-        "fetch_k": 15
-    }
+    search_kwargs={"k": 6, "fetch_k": 20}
 )
 
-# Local model
-llm = ChatOllama(
-    model="gemma3:4b"
-)
+# -----------------------------
+# STATE (LangGraph memory)
+# -----------------------------
+class AgentState(TypedDict):
+    question: str
+    docs: list
+    context: str
+    answer: str
 
-# User question
-question = st.text_input(
-    "Ask a company policy question"
-)
+# -----------------------------
+# HELPERS
+# -----------------------------
+def deduplicate(docs):
+    seen = set()
+    out = []
 
-if question:
+    for d in docs:
+        text = " ".join(d.page_content.split())
+        if text not in seen:
+            seen.add(text)
+            out.append(d)
 
-    # Agentic routing logic
-    routing_prompt = f"""
-You are an intelligent AI assistant.
+    return out
 
-Decide if the following question requires searching the company handbook.
 
-Reply ONLY with:
-YES
-or
-NO
+def rerank(question, docs, top_k=3):
+    pairs = [(question, d.page_content) for d in docs]
+    scores = reranker.predict(pairs)
 
-Question:
-{question}
-"""
+    ranked = sorted(zip(docs, scores), key=lambda x: x[1], reverse=True)
+    return [d for d, _ in ranked[:top_k]]
 
-    route_decision = llm.invoke(
-        routing_prompt
-    ).content.strip()
+# -----------------------------
+# NODE 1: Retrieve
+# -----------------------------
+def retrieve_node(state: AgentState):
+    question = state["question"]
 
-    # Retrieval path
-    if "YES" in route_decision:
+    docs = retriever.invoke(question)
+    docs = deduplicate(docs)
+    docs = rerank(question, docs, top_k=3)
 
-        docs = retriever.invoke(question)
+    return {"docs": docs}
 
-        context = "\n\n".join(
-            [doc.page_content for doc in docs]
-        )
+# -----------------------------
+# NODE 2: Build Context
+# -----------------------------
+def context_node(state: AgentState):
+    docs = state["docs"]
 
-        final_prompt = f"""
-You are a company HR policy assistant.
+    context = "\n\n".join(d.page_content for d in docs)
 
-Answer ONLY using the provided handbook context.
+    return {"context": context}
 
-If answer is not found, say:
-"I could not find that information in the handbook."
+# -----------------------------
+# NODE 3: Generate Answer
+# -----------------------------
+def answer_node(state: AgentState):
+    question = state["question"]
+    context = state["context"]
+
+    prompt = f"""
+You are a strict HR assistant.
+
+RULES:
+- Use ONLY the context below
+- If answer not found, say:
+  "I could not find this information in the handbook."
 
 Context:
 {context}
 
 Question:
 {question}
+
+Answer:
 """
 
-        response = llm.invoke(final_prompt)
+    response = llm.invoke(prompt).content
 
-        st.subheader("Answer")
+    return {"answer": response}
 
-        st.write(response.content)
+# -----------------------------
+# BUILD GRAPH
+# -----------------------------
+graph = StateGraph(AgentState)
 
-        st.subheader("Retrieved Context")
+graph.add_node("retrieve", retrieve_node)
+graph.add_node("context", context_node)
+graph.add_node("answer", answer_node)
 
-        for i, doc in enumerate(docs):
+graph.set_entry_point("retrieve")
 
-            st.write(f"### Chunk {i+1}")
+graph.add_edge("retrieve", "context")
+graph.add_edge("context", "answer")
+graph.add_edge("answer", END)
 
-            st.write(doc.page_content)
+app_graph = graph.compile()
 
-    # Non-retrieval path
-    else:
+# -----------------------------
+# STREAMLIT INPUT
+# -----------------------------
+question = st.text_input("Ask company policy question")
 
-        response = llm.invoke(question)
+if question:
 
-        st.subheader("Answer")
+    with st.spinner("Running LangGraph agent..."):
 
-        st.write(response.content)
+        result = app_graph.invoke({
+            "question": question
+        })
+
+        st.subheader("📌 Answer")
+        st.write(result["answer"])
+
+        st.success("Powered by LangGraph RAG Agent")
+
+        with st.expander("Retrieved Chunks"):
+
+            for i, doc in enumerate(result["docs"]):
+                st.markdown(f"### Chunk {i+1}")
+                st.write(doc.page_content)
