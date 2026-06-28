@@ -20,8 +20,8 @@ load_dotenv()
 # -----------------------------
 # UI
 # -----------------------------
-st.set_page_config(page_title="LangGraph RAG Agent", page_icon="🤖")
-st.title("🤖 LangGraph Production RAG Agent")
+st.set_page_config(page_title="LangGraph RAG Agent")
+st.title("LangGraph Production RAG Agent")
 
 # -----------------------------
 # Reranker
