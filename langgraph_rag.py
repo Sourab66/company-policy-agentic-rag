@@ -21,7 +21,7 @@ load_dotenv()
 # UI
 # -----------------------------
 st.set_page_config(page_title="LangGraph RAG Agent")
-st.title("LangGraph Production RAG Agent")
+st.title("LangGraph RAG Agent")
 
 # -----------------------------
 # Reranker
@@ -111,7 +111,24 @@ def retrieve_node(state: AgentState):
     return {"docs": docs}
 
 # -----------------------------
-# NODE 2: Build Context
+# NODE 2: No Results Fallback
+# -----------------------------
+def no_results_node(state: AgentState):
+    return {"answer": "I could not find this information in the handbook."}
+
+# -----------------------------
+# ROUTER: Decide path based on retrieval result
+# -----------------------------
+def retrieval_router(state: AgentState) -> str:
+    """This is the actual 'agentic' part: the graph inspects its own
+    retrieval output and decides which path to take next, instead of
+    always following one fixed sequence."""
+    if not state["docs"]:
+        return "no_results"
+    return "has_results"
+
+# -----------------------------
+# NODE 3: Build Context
 # -----------------------------
 def context_node(state: AgentState):
     docs = state["docs"]
@@ -121,7 +138,7 @@ def context_node(state: AgentState):
     return {"context": context}
 
 # -----------------------------
-# NODE 3: Generate Answer
+# NODE 4: Generate Answer
 # -----------------------------
 def answer_node(state: AgentState):
     question = state["question"]
@@ -154,14 +171,27 @@ Answer:
 graph = StateGraph(AgentState)
 
 graph.add_node("retrieve", retrieve_node)
+graph.add_node("no_results", no_results_node)
 graph.add_node("context", context_node)
 graph.add_node("answer", answer_node)
 
 graph.set_entry_point("retrieve")
 
-graph.add_edge("retrieve", "context")
+# Conditional branch: the graph decides where to go based on whether
+# retrieval actually found anything, instead of always moving forward
+# in a fixed straight line.
+graph.add_conditional_edges(
+    "retrieve",
+    retrieval_router,
+    {
+        "no_results": "no_results",
+        "has_results": "context"
+    }
+)
+
 graph.add_edge("context", "answer")
 graph.add_edge("answer", END)
+graph.add_edge("no_results", END)
 
 app_graph = graph.compile()
 
@@ -185,6 +215,6 @@ if question:
 
         with st.expander("Retrieved Chunks"):
 
-            for i, doc in enumerate(result["docs"]):
+            for i, doc in enumerate(result.get("docs", [])):
                 st.markdown(f"### Chunk {i+1}")
                 st.write(doc.page_content)
